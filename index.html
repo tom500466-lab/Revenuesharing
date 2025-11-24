@@ -3,19 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemini 分帳神器</title>
+    <title>分帳小工具</title>
     
-    <!-- 1. 引入 React 和 ReactDOM (UMD 版本，保證瀏覽器可讀) -->
+    <!-- 1. 引入 React 和 ReactDOM (UMD 版本) -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     
-    <!-- 2. 引入 Babel (負責翻譯 JSX) -->
+    <!-- 2. 引入 Babel -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     
-    <!-- 3. 引入 Tailwind CSS (樣式) -->
+    <!-- 3. 引入 Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
 
-    <!-- 4. 引入 FontAwesome (圖示庫，比 Lucide 更適合單檔使用) -->
+    <!-- 4. 引入 FontAwesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
     <!-- 設定 Tailwind -->
@@ -68,8 +68,11 @@
             const [expenses, setExpenses] = useState([]);
             const [activeTab, setActiveTab] = useState("people");
             const [rates, setRates] = useState(DEFAULT_RATES);
-            const [showRateModal, setShowRateModal] = useState(false);
             
+            // Settings State
+            const [showSettingsModal, setShowSettingsModal] = useState(false);
+            const [apiKey, setApiKey] = useState("");
+
             // AI Scan State
             const [isScanning, setIsScanning] = useState(false);
             const [errorMsg, setErrorMsg] = useState(null);
@@ -88,8 +91,11 @@
             const [newExpenseInvolved, setNewExpenseInvolved] = useState([]);
             const fileInputRef = useRef(null);
 
-            // Init
+            // Init: Load API Key from LocalStorage
             useEffect(() => {
+                const storedKey = localStorage.getItem("gemini_api_key");
+                if (storedKey) setApiKey(storedKey);
+                
                 if (people.length > 0 && !singlePayerId) {
                     setSinglePayerId(people[0].id);
                     setNewExpenseInvolved(people.map((p) => p.id));
@@ -97,6 +103,12 @@
             }, [people]);
 
             // Handlers
+            const handleApiKeyChange = (e) => {
+                const val = e.target.value;
+                setApiKey(val);
+                localStorage.setItem("gemini_api_key", val);
+            };
+
             const addPerson = (name) => {
                 if (!name.trim()) return;
                 const newPerson = { id: generateId(), name: name.trim() };
@@ -189,6 +201,15 @@
             const handleFileUpload = async (e) => {
                 const file = e.target.files?.[0];
                 if (!file) return;
+                
+                // Check if API Key exists
+                if (!apiKey) {
+                    alert("請先點擊右上角「設定」，輸入您的 Gemini API Key！");
+                    setShowSettingsModal(true);
+                    e.target.value = ""; // Reset file input
+                    return;
+                }
+
                 setIsScanning(true);
                 setErrorMsg(null);
                 try {
@@ -206,12 +227,6 @@
             };
 
             const scanReceipt = async (base64Data, mimeType) => {
-                const apiKey = ""; // 請在此填入 API Key
-                if (!apiKey) {
-                    setIsScanning(false);
-                    return alert("請在程式碼中填入 Gemini API Key 才能使用 AI 掃描功能！");
-                }
-                
                 const modelId = "gemini-2.5-flash-preview-09-2025";
                 const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
                 const prompt = `分析這張收據圖片。提取所有購買項目及其價格。忽略稅金、小計和總計。如果項目名稱是中文請保留中文。請嘗試判斷幣別 (TWD, USD, JPY, KRW, THB, EUR)，如果無法判斷則預設 TWD。回傳 JSON: { "items": [{ "title": string, "amount": number }], "currency": string }`;
@@ -225,7 +240,14 @@
                             generationConfig: { responseMimeType: "application/json" }
                         })
                     });
-                    if (!response.ok) throw new Error("API Error");
+                    
+                    if (!response.ok) {
+                        if (response.status === 400 || response.status === 403) {
+                            throw new Error("API Key 無效或過期，請檢查設定。");
+                        }
+                        throw new Error("連線錯誤");
+                    }
+
                     const data = await response.json();
                     const result = JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
                     
@@ -250,7 +272,7 @@
                     }
                 } catch (e) {
                     console.error(e);
-                    setErrorMsg("辨識失敗");
+                    setErrorMsg(e.message || "辨識失敗，請重試");
                 } finally {
                     setIsScanning(false);
                 }
@@ -307,6 +329,13 @@
                 return Math.max(0, total - current);
             };
 
+            const updateRate = (currency, value) => {
+                const num = parseFloat(value);
+                if (!isNaN(num)) {
+                    setRates(prev => ({ ...prev, [currency]: num }));
+                }
+            };
+
             // Components
             const TabButton = ({ id, label, icon }) => (
                 <button onClick={() => setActiveTab(id)} className={`flex-1 flex flex-col items-center justify-center py-3 transition ${activeTab === id ? "text-emerald-600 border-t-2 border-emerald-600 bg-white" : "text-gray-400 bg-gray-50"}`}>
@@ -319,8 +348,14 @@
                     {/* Header */}
                     <header className="bg-emerald-600 text-white p-4 shadow-md z-10">
                         <div className="flex justify-between items-center mb-2">
-                            <h1 className="text-xl font-bold flex items-center gap-2"><i className="fas fa-receipt"></i> Gemini 分帳神器</h1>
-                            <button onClick={() => setShowRateModal(true)} className="text-xs bg-emerald-700 hover:bg-emerald-800 px-2 py-1.5 rounded flex items-center gap-1"><i className="fas fa-globe"></i> 匯率</button>
+                            <h1 className="text-xl font-bold flex items-baseline gap-2">
+                                <i className="fas fa-receipt self-center"></i> 
+                                分帳小工具 
+                                <span className="text-xs text-emerald-200 font-normal ml-1 opacity-80">Rico製</span>
+                            </h1>
+                            <button onClick={() => setShowSettingsModal(true)} className="text-xs bg-emerald-700 hover:bg-emerald-800 px-2 py-1.5 rounded flex items-center gap-1">
+                                <i className="fas fa-cog"></i> 設定
+                            </button>
                         </div>
                         <div className="text-sm bg-emerald-700/50 px-3 py-1 rounded-lg inline-block">有效總花費: {formatCurrency(totalSpent)}</div>
                     </header>
@@ -475,13 +510,49 @@
                             </div>
                         </div>
                     )}
-                    {/* Rate Modal */}
-                    {showRateModal && (
+
+                    {/* Settings Modal (Rates + API Key) */}
+                    {showSettingsModal && (
                         <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-                            <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl">
-                                <div className="flex justify-between mb-4"><h3 className="font-bold">匯率設定</h3><button onClick={() => setShowRateModal(false)}><i className="fas fa-times"></i></button></div>
-                                <div className="space-y-3">{Object.keys(DEFAULT_RATES).filter(c => c !== "TWD").map(c => <div key={c} className="flex justify-between bg-gray-50 p-3 rounded"><span>{CURRENCY_LABELS[c]}</span><div className="flex gap-2 items-center"><input type="number" step="0.001" value={rates[c]} onChange={e => updateRate(c, e.target.value)} className="w-20 p-1 border text-right" /><span className="text-xs text-gray-400">TWD</span></div></div>)}</div>
-                                <button onClick={() => setShowRateModal(false)} className="w-full mt-6 bg-gray-800 text-white py-2 rounded-lg">完成</button>
+                            <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl overflow-y-auto max-h-[90vh]">
+                                <div className="flex justify-between mb-4">
+                                    <h3 className="font-bold text-lg text-gray-800">系統設定</h3>
+                                    <button onClick={() => setShowSettingsModal(false)}><i className="fas fa-times text-gray-400"></i></button>
+                                </div>
+                                
+                                {/* API Key Section */}
+                                <div className="mb-6 border-b pb-6">
+                                    <h4 className="text-sm font-bold text-emerald-700 mb-2"><i className="fas fa-key"></i> Gemini API Key</h4>
+                                    <p className="text-xs text-gray-500 mb-2">輸入 Key 才能使用 AI 掃描。我們會自動儲存於您的瀏覽器中。</p>
+                                    <input 
+                                        type="password" 
+                                        value={apiKey} 
+                                        onChange={handleApiKeyChange}
+                                        placeholder="貼上您的 API Key" 
+                                        className="w-full p-2 border rounded text-sm bg-gray-50 focus:ring-1 focus:ring-emerald-500 outline-none" 
+                                    />
+                                    <div className="mt-2 text-right">
+                                        <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-xs text-blue-500 underline">取得免費 API Key</a>
+                                    </div>
+                                </div>
+
+                                {/* Rates Section */}
+                                <div>
+                                    <h4 className="text-sm font-bold text-emerald-700 mb-2"><i className="fas fa-exchange-alt"></i> 匯率設定 (兌台幣)</h4>
+                                    <div className="space-y-2">
+                                        {Object.keys(DEFAULT_RATES).filter(c => c !== "TWD").map(c => (
+                                            <div key={c} className="flex justify-between bg-gray-50 p-2 rounded text-sm items-center">
+                                                <span>{CURRENCY_LABELS[c]}</span>
+                                                <div className="flex gap-2 items-center">
+                                                    <input type="number" step="0.001" value={rates[c]} onChange={e => updateRate(c, e.target.value)} className="w-20 p-1 border text-right rounded" />
+                                                    <span className="text-xs text-gray-400">TWD</span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <button onClick={() => setShowSettingsModal(false)} className="w-full mt-6 bg-gray-800 text-white py-2 rounded-lg font-bold">完成</button>
                             </div>
                         </div>
                     )}
