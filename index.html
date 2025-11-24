@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini 分帳神器</title>
+    
+    <!-- 1. 引入 React 和 ReactDOM (UMD 版本，保證瀏覽器可讀) -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- 2. 引入 Babel (負責翻譯 JSX) -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- 3. 引入 Tailwind CSS (樣式) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- 4. 引入 FontAwesome (圖示庫，比 Lucide 更適合單檔使用) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- 設定 Tailwind -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+                    animation: {
+                        'fade-in': 'fadeIn 0.5s ease-out',
+                        'slide-up': 'slideUp 0.3s ease-out',
+                    },
+                    keyframes: {
+                        fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+                        slideUp: { '0%': { transform: 'translateY(20px)', opacity: '0' }, '100%': { transform: 'translateY(0)', opacity: '1' } }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // 取得 React 全域變數
+        const { useState, useEffect, useRef } = React;
+        const { createRoot } = ReactDOM;
+
+        // --- Utils & Constants ---
+        const generateId = () => Math.random().toString(36).substr(2, 9);
+        const formatCurrency = (amount, currency = "TWD") => {
+            return new Intl.NumberFormat("zh-TW", {
+                style: "currency", currency: currency,
+                maximumFractionDigits: ["TWD", "JPY", "KRW"].includes(currency) ? 0 : 2,
+            }).format(amount);
+        };
+
+        const DEFAULT_RATES = { TWD: 1, USD: 32.5, JPY: 0.21, THB: 0.92, KRW: 0.024, EUR: 34.5 };
+        const CURRENCY_LABELS = { TWD: "台幣 (TWD)", USD: "美金 (USD)", JPY: "日幣 (JPY)", THB: "泰銖 (THB)", KRW: "韓元 (KRW)", EUR: "歐元 (EUR)" };
+
+        // --- Main App Component ---
+        function App() {
+            // State
+            const [people, setPeople] = useState([{ id: "p1", name: "小明" }, { id: "p2", name: "小美" }]);
+            const [expenses, setExpenses] = useState([]);
+            const [activeTab, setActiveTab] = useState("people");
+            const [rates, setRates] = useState(DEFAULT_RATES);
+            const [showRateModal, setShowRateModal] = useState(false);
+            
+            // AI Scan State
+            const [isScanning, setIsScanning] = useState(false);
+            const [errorMsg, setErrorMsg] = useState(null);
+            
+            // Form State
+            const [showAddModal, setShowAddModal] = useState(false);
+            const [editingId, setEditingId] = useState(null);
+            const [newExpenseTitle, setNewExpenseTitle] = useState("");
+            const [newExpenseAmount, setNewExpenseAmount] = useState("");
+            const [newExpenseCurrency, setNewExpenseCurrency] = useState("TWD");
+            
+            // Payment Logic
+            const [paymentMode, setPaymentMode] = useState("single");
+            const [singlePayerId, setSinglePayerId] = useState("");
+            const [multiPayerMap, setMultiPayerMap] = useState({});
+            const [newExpenseInvolved, setNewExpenseInvolved] = useState([]);
+            const fileInputRef = useRef(null);
+
+            // Init
+            useEffect(() => {
+                if (people.length > 0 && !singlePayerId) {
+                    setSinglePayerId(people[0].id);
+                    setNewExpenseInvolved(people.map((p) => p.id));
+                }
+            }, [people]);
+
+            // Handlers
+            const addPerson = (name) => {
+                if (!name.trim()) return;
+                const newPerson = { id: generateId(), name: name.trim() };
+                setPeople([...people, newPerson]);
+                setNewExpenseInvolved(prev => [...prev, newPerson.id]);
+            };
+
+            const removePerson = (id) => {
+                setPeople(people.filter(p => p.id !== id));
+                setExpenses(expenses.filter(e => !e.payers.some(p => p.id === id))
+                    .map(e => ({ ...e, involvedIds: e.involvedIds.filter(pid => pid !== id) }))
+                    .filter(e => e.involvedIds.length > 0));
+            };
+
+            const handleSaveExpense = () => {
+                const originalAmount = parseFloat(newExpenseAmount);
+                if (!newExpenseTitle || !newExpenseAmount || isNaN(originalAmount) || originalAmount <= 0) return;
+                if (newExpenseInvolved.length === 0) return alert("請至少選擇一位分攤人");
+
+                let finalPayers = [];
+                if (paymentMode === "single") {
+                    if (!singlePayerId) return alert("請選擇先付錢的人");
+                    finalPayers = [{ id: singlePayerId, amount: originalAmount }];
+                } else {
+                    let currentSum = 0;
+                    const payersList = [];
+                    Object.entries(multiPayerMap).forEach(([id, amtStr]) => {
+                        const val = parseFloat(amtStr);
+                        if (!isNaN(val) && val > 0) {
+                            payersList.push({ id, amount: val });
+                            currentSum += val;
+                        }
+                    });
+                    if (Math.abs(currentSum - originalAmount) > 0.1) return alert(`付款總和 (${currentSum}) 與消費金額不符`);
+                    finalPayers = payersList;
+                }
+
+                const rate = rates[newExpenseCurrency];
+                const expenseObj = {
+                    title: newExpenseTitle,
+                    amount: originalAmount * rate,
+                    originalAmount: originalAmount,
+                    currency: newExpenseCurrency,
+                    exchangeRate: rate,
+                    payers: finalPayers,
+                    involvedIds: newExpenseInvolved,
+                    included: true
+                };
+
+                if (editingId) {
+                    setExpenses(expenses.map(e => e.id === editingId ? { ...e, ...expenseObj, id: e.id, included: e.included } : e));
+                } else {
+                    setExpenses([...expenses, { ...expenseObj, id: generateId() }]);
+                }
+                resetForm();
+                setShowAddModal(false);
+            };
+
+            const startEditExpense = (expense) => {
+                setEditingId(expense.id);
+                setNewExpenseTitle(expense.title);
+                setNewExpenseAmount(expense.originalAmount.toString());
+                setNewExpenseCurrency(expense.currency);
+                setNewExpenseInvolved(expense.involvedIds);
+                if (expense.payers.length === 1 && Math.abs(expense.payers[0].amount - expense.originalAmount) < 0.01) {
+                    setPaymentMode("single");
+                    setSinglePayerId(expense.payers[0].id);
+                    setMultiPayerMap({});
+                } else {
+                    setPaymentMode("multi");
+                    const map = {};
+                    expense.payers.forEach(p => map[p.id] = p.amount.toString());
+                    setMultiPayerMap(map);
+                }
+                setShowAddModal(true);
+            };
+
+            const resetForm = () => {
+                setEditingId(null);
+                setNewExpenseTitle("");
+                setNewExpenseAmount("");
+                setPaymentMode("single");
+                setMultiPayerMap({});
+                if (people.length > 0) {
+                    setSinglePayerId(people[0].id);
+                    setNewExpenseInvolved(people.map(p => p.id));
+                }
+            };
+
+            const handleFileUpload = async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                setIsScanning(true);
+                setErrorMsg(null);
+                try {
+                    const reader = new FileReader();
+                    reader.onloadend = async () => {
+                        const base64String = reader.result.split(",")[1];
+                        await scanReceipt(base64String, file.type);
+                    };
+                    reader.readAsDataURL(file);
+                } catch (err) {
+                    setErrorMsg("讀取失敗");
+                    setIsScanning(false);
+                }
+                e.target.value = "";
+            };
+
+            const scanReceipt = async (base64Data, mimeType) => {
+                const apiKey = ""; // 請在此填入 API Key
+                if (!apiKey) {
+                    setIsScanning(false);
+                    return alert("請在程式碼中填入 Gemini API Key 才能使用 AI 掃描功能！");
+                }
+                
+                const modelId = "gemini-2.5-flash-preview-09-2025";
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+                const prompt = `分析這張收據圖片。提取所有購買項目及其價格。忽略稅金、小計和總計。如果項目名稱是中文請保留中文。請嘗試判斷幣別 (TWD, USD, JPY, KRW, THB, EUR)，如果無法判斷則預設 TWD。回傳 JSON: { "items": [{ "title": string, "amount": number }], "currency": string }`;
+
+                try {
+                    const response = await fetch(url, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: mimeType, data: base64Data } }] }],
+                            generationConfig: { responseMimeType: "application/json" }
+                        })
+                    });
+                    if (!response.ok) throw new Error("API Error");
+                    const data = await response.json();
+                    const result = JSON.parse(data.candidates?.[0]?.content?.parts?.[0]?.text || "{}");
+                    
+                    let detCurrency = "TWD";
+                    if (result.currency && ["USD", "JPY", "THB", "KRW", "EUR"].includes(result.currency.toUpperCase())) detCurrency = result.currency.toUpperCase();
+                    const rate = rates[detCurrency];
+
+                    if (result.items) {
+                        const newExps = result.items.map(item => ({
+                            id: generateId(),
+                            title: item.title,
+                            amount: item.amount * rate,
+                            originalAmount: item.amount,
+                            currency: detCurrency,
+                            exchangeRate: rate,
+                            payers: [{ id: singlePayerId || people[0].id, amount: item.amount }],
+                            involvedIds: people.map(p => p.id),
+                            included: true
+                        }));
+                        setExpenses(prev => [...prev, ...newExps]);
+                        setActiveTab("expenses");
+                    }
+                } catch (e) {
+                    console.error(e);
+                    setErrorMsg("辨識失敗");
+                } finally {
+                    setIsScanning(false);
+                }
+            };
+
+            // Calculate
+            const calculateSettlement = () => {
+                const balances = {}, totalPaid = {}, fairShare = {};
+                people.forEach(p => { balances[p.id] = 0; totalPaid[p.id] = 0; fairShare[p.id] = 0; });
+                
+                const activeExps = expenses.filter(e => e.included);
+                activeExps.forEach(exp => {
+                    if (exp.involvedIds.length === 0) return;
+                    const share = exp.amount / exp.involvedIds.length;
+                    exp.payers.forEach(p => {
+                        const paid = p.amount * exp.exchangeRate;
+                        balances[p.id] += paid;
+                        totalPaid[p.id] += paid;
+                    });
+                    exp.involvedIds.forEach(pid => {
+                        balances[pid] -= share;
+                        fairShare[pid] += share;
+                    });
+                });
+
+                const debtors = [], creditors = [];
+                Object.entries(balances).forEach(([id, amt]) => {
+                    const r = Math.round(amt * 100) / 100;
+                    if (r < -0.01) debtors.push({ id, amount: r });
+                    if (r > 0.01) creditors.push({ id, amount: r });
+                });
+                debtors.sort((a, b) => a.amount - b.amount);
+                creditors.sort((a, b) => b.amount - a.amount);
+
+                const settlements = [];
+                let i = 0, j = 0;
+                while (i < debtors.length && j < creditors.length) {
+                    const debtor = debtors[i], creditor = creditors[j];
+                    const amt = Math.min(Math.abs(debtor.amount), creditor.amount);
+                    settlements.push({ fromId: debtor.id, toId: creditor.id, amount: Math.round(amt * 100) / 100 });
+                    debtor.amount += amt; creditor.amount -= amt;
+                    if (Math.abs(debtor.amount) < 0.01) i++;
+                    if (creditor.amount < 0.01) j++;
+                }
+                return { balances, settlements, totalPaid, fairShare, activeExps };
+            };
+            
+            const { balances, settlements, totalPaid, fairShare, activeExps } = calculateSettlement();
+            const totalSpent = activeExps.reduce((sum, e) => sum + e.amount, 0);
+            const getMultiPayerRemaining = () => {
+                const total = parseFloat(newExpenseAmount) || 0;
+                let current = 0;
+                Object.values(multiPayerMap).forEach(v => { const val = parseFloat(v); if (!isNaN(val)) current += val; });
+                return Math.max(0, total - current);
+            };
+
+            // Components
+            const TabButton = ({ id, label, icon }) => (
+                <button onClick={() => setActiveTab(id)} className={`flex-1 flex flex-col items-center justify-center py-3 transition ${activeTab === id ? "text-emerald-600 border-t-2 border-emerald-600 bg-white" : "text-gray-400 bg-gray-50"}`}>
+                    <i className={`fas ${icon} mb-1 text-lg`}></i><span className="text-xs font-medium">{label}</span>
+                </button>
+            );
+
+            return (
+                <div className="max-w-md mx-auto h-screen flex flex-col bg-gray-100 shadow-2xl relative font-sans overflow-hidden">
+                    {/* Header */}
+                    <header className="bg-emerald-600 text-white p-4 shadow-md z-10">
+                        <div className="flex justify-between items-center mb-2">
+                            <h1 className="text-xl font-bold flex items-center gap-2"><i className="fas fa-receipt"></i> Gemini 分帳神器</h1>
+                            <button onClick={() => setShowRateModal(true)} className="text-xs bg-emerald-700 hover:bg-emerald-800 px-2 py-1.5 rounded flex items-center gap-1"><i className="fas fa-globe"></i> 匯率</button>
+                        </div>
+                        <div className="text-sm bg-emerald-700/50 px-3 py-1 rounded-lg inline-block">有效總花費: {formatCurrency(totalSpent)}</div>
+                    </header>
+
+                    {/* Content */}
+                    <main className="flex-1 overflow-y-auto p-4 pb-20 scrollbar-thin scrollbar-thumb-gray-300">
+                        {activeTab === "people" && (
+                            <div className="space-y-4 animate-fade-in">
+                                <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+                                    <h2 className="text-lg font-semibold text-gray-800 mb-3">參與成員</h2>
+                                    <form onSubmit={(e) => { e.preventDefault(); addPerson(e.target.name.value); e.target.name.value = ""; }} className="flex gap-2 mb-4">
+                                        <input name="name" type="text" placeholder="輸入名字 (例如: 阿豪)" className="flex-1 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500" autoComplete="off" />
+                                        <button type="submit" className="bg-emerald-600 text-white px-4 rounded-lg"><i className="fas fa-plus"></i></button>
+                                    </form>
+                                    <div className="space-y-2">
+                                        {people.map(p => (
+                                            <div key={p.id} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center font-bold text-sm">{p.name.charAt(0).toUpperCase()}</div>
+                                                    <span className="font-medium text-gray-700">{p.name}</span>
+                                                </div>
+                                                {expenses.every(e => !e.payers.some(payer => payer.id === p.id) && !e.involvedIds.includes(p.id)) && 
+                                                    <button onClick={() => removePerson(p.id)} className="text-red-400 p-2"><i className="fas fa-trash-alt"></i></button>
+                                                }
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 text-sm text-blue-700 flex gap-2"><i className="fas fa-info-circle mt-0.5"></i> 請先確認所有成員都已加入名單。</div>
+                            </div>
+                        )}
+
+                        {activeTab === "expenses" && (
+                            <div className="space-y-4 animate-fade-in">
+                                <div className="grid grid-cols-2 gap-3">
+                                    <button onClick={() => { resetForm(); setShowAddModal(true); }} className="bg-emerald-600 text-white py-3 rounded-xl shadow-sm flex items-center justify-center gap-2 font-medium"><i className="fas fa-plus-circle"></i> 手動輸入</button>
+                                    <button onClick={() => fileInputRef.current?.click()} disabled={isScanning} className="bg-indigo-600 text-white py-3 rounded-xl shadow-sm flex items-center justify-center gap-2 font-medium disabled:bg-indigo-400">
+                                        {isScanning ? <><i className="fas fa-spinner fa-spin"></i> 辨識中...</> : <><i className="fas fa-camera"></i> AI 掃描</>}
+                                        <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileUpload} />
+                                    </button>
+                                </div>
+                                {errorMsg && <div className="bg-red-50 text-red-600 p-3 rounded-lg text-sm flex gap-2"><i className="fas fa-exclamation-triangle mt-0.5"></i> {errorMsg}</div>}
+                                <div className="space-y-3">
+                                    {expenses.map(exp => (
+                                        <div key={exp.id} className={`bg-white rounded-xl shadow-sm border flex overflow-hidden ${exp.included ? "border-gray-100" : "border-gray-200 opacity-60 bg-gray-50"}`}>
+                                            <div onClick={() => setExpenses(prev => prev.map(e => e.id === exp.id ? { ...e, included: !e.included } : e))} className={`w-10 flex items-center justify-center cursor-pointer border-r ${exp.included ? "bg-white" : "bg-gray-50"}`}>
+                                                <div className={`w-5 h-5 rounded border flex items-center justify-center ${exp.included ? "bg-emerald-500 border-emerald-500" : "border-gray-300 bg-white"}`}>{exp.included && <i className="fas fa-check text-white text-xs"></i>}</div>
+                                            </div>
+                                            <div className="flex-1 p-3">
+                                                <div className="flex justify-between items-start mb-1">
+                                                    <h3 className={`font-semibold ${exp.included ? "text-gray-800" : "text-gray-500 line-through"}`}>{exp.title}</h3>
+                                                    <div className="text-right">
+                                                        <span className={`font-bold block ${exp.included ? "text-emerald-600" : "text-gray-500"}`}>{formatCurrency(exp.amount)}</span>
+                                                        {exp.currency !== "TWD" && <span className="text-xs text-gray-400 block">{formatCurrency(exp.originalAmount, exp.currency)}</span>}
+                                                    </div>
+                                                </div>
+                                                <div className="text-xs text-gray-500 mb-2 flex justify-between">
+                                                    <span className="truncate max-w-[70%]">先付: {exp.payers.map(p => people.find(per => per.id === p.id)?.name).join(", ")}</span>
+                                                    {exp.currency !== "TWD" && <span className="bg-gray-100 px-1 rounded">匯率: {exp.exchangeRate}</span>}
+                                                </div>
+                                                <div className="flex flex-wrap gap-1">
+                                                    {exp.involvedIds.map(id => {
+                                                        const p = people.find(per => per.id === id);
+                                                        return p ? <span key={id} className="text-[10px] bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{p.name}</span> : null;
+                                                    })}
+                                                </div>
+                                            </div>
+                                            <div className="flex flex-col border-l border-gray-100">
+                                                <button onClick={() => startEditExpense(exp)} className="flex-1 px-3 text-blue-400 hover:text-blue-600 hover:bg-blue-50 flex items-center justify-center"><i className="fas fa-pen"></i></button>
+                                                <button onClick={() => { if(confirm("刪除?")) setExpenses(prev => prev.filter(e => e.id !== exp.id)) }} className="flex-1 px-3 text-gray-300 hover:text-red-500 hover:bg-red-50 border-t border-gray-100 flex items-center justify-center"><i className="fas fa-trash-alt"></i></button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {expenses.length === 0 && <div className="text-center py-10 opacity-50"><i className="fas fa-receipt text-4xl mb-2 text-gray-300"></i><p className="text-gray-500">無記錄</p></div>}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === "settle" && (
+                            <div className="space-y-6 animate-fade-in">
+                                <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+                                    <h2 className="text-lg font-semibold text-gray-800 mb-4 border-b pb-2">明細</h2>
+                                    <div className="grid grid-cols-4 text-xs font-medium text-gray-400 mb-2 px-2">
+                                        <div>成員</div><div className="text-right">已先付</div><div className="text-right">應分攤</div><div className="text-right">多退少補</div>
+                                    </div>
+                                    {people.map(p => {
+                                        const bal = balances[p.id], pos = bal > 0.01, neg = bal < -0.01;
+                                        return (
+                                            <div key={p.id} className="grid grid-cols-4 items-center text-sm py-3 border-b border-gray-50 last:border-0 px-2">
+                                                <div className="font-medium text-gray-800 truncate">{p.name}</div>
+                                                <div className="text-right text-gray-500">{formatCurrency(totalPaid[p.id])}</div>
+                                                <div className="text-right text-gray-500">{formatCurrency(fairShare[p.id])}</div>
+                                                <div className="text-right flex flex-col items-end">
+                                                    <span className={`font-mono font-bold ${pos ? 'text-green-600' : neg ? 'text-red-500' : 'text-gray-400'}`}>{pos ? '+' : ''}{formatCurrency(bal)}</span>
+                                                </div>
+                                            </div>
+                                        )
+                                    })}
+                                </div>
+                                <div>
+                                    <h2 className="text-lg font-semibold text-gray-800 mb-3 px-1">建議轉帳</h2>
+                                    {settlements.length > 0 ? (
+                                        <div className="space-y-3">
+                                            {settlements.map((s, idx) => (
+                                                <div key={idx} className="bg-white p-4 rounded-xl shadow-sm border-l-4 border-emerald-500 flex items-center justify-between">
+                                                    <div className="flex items-center gap-2 text-sm"><span className="font-bold">{people.find(p => p.id === s.fromId)?.name}</span> <i className="fas fa-long-arrow-alt-right text-gray-400"></i> <span className="font-bold">{people.find(p => p.id === s.toId)?.name}</span></div>
+                                                    <div className="font-bold text-emerald-700 bg-emerald-50 px-3 py-1 rounded-lg">{formatCurrency(s.amount)}</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : <div className="bg-green-50 text-green-700 p-6 rounded-xl text-center"><i className="fas fa-check-circle text-3xl mb-2"></i><p>已結清</p></div>}
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Nav */}
+                    <nav className="bg-white border-t flex absolute bottom-0 w-full shadow-lg z-20 safe-area-bottom">
+                        <TabButton id="people" label="成員" icon="fa-users" />
+                        <TabButton id="expenses" label="費用" icon="fa-list-ul" />
+                        <TabButton id="settle" label="結算" icon="fa-hand-holding-usd" />
+                    </nav>
+
+                    {/* Modal */}
+                    {showAddModal && (
+                        <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-end sm:items-center justify-center">
+                            <div className="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl p-6 shadow-2xl animate-slide-up max-h-[90vh] overflow-y-auto">
+                                <div className="flex justify-between items-center mb-5"><h3 className="text-xl font-bold">{editingId ? '編輯' : '新增'}</h3><button onClick={() => setShowAddModal(false)} className="text-gray-400"><i className="fas fa-times text-xl"></i></button></div>
+                                <div className="space-y-4">
+                                    <input type="text" value={newExpenseTitle} onChange={e => setNewExpenseTitle(e.target.value)} placeholder="項目名稱" className="w-full p-3 bg-gray-50 border rounded-lg" />
+                                    <div className="flex gap-2">
+                                        <select value={newExpenseCurrency} onChange={e => setNewExpenseCurrency(e.target.value)} className="w-1/3 p-3 bg-gray-50 border rounded-lg">{Object.keys(DEFAULT_RATES).map(c => <option key={c} value={c}>{c}</option>)}</select>
+                                        <input type="number" value={newExpenseAmount} onChange={e => setNewExpenseAmount(e.target.value)} placeholder="金額" className="flex-1 p-3 bg-gray-50 border rounded-lg" />
+                                    </div>
+                                    {newExpenseCurrency !== "TWD" && <div className="text-right text-xs text-gray-500">約台幣 <span className="font-bold text-emerald-600">{formatCurrency((parseFloat(newExpenseAmount)||0) * rates[newExpenseCurrency])}</span></div>}
+                                    
+                                    <div className="bg-gray-50 p-3 rounded-xl border">
+                                        <div className="flex justify-between mb-2"><span className="text-xs text-gray-500">誰先付?</span><div className="flex bg-gray-200 p-0.5 rounded"><button onClick={() => setPaymentMode("single")} className={`px-2 py-1 text-xs rounded ${paymentMode === "single" ? "bg-white shadow" : ""}`}>單人</button><button onClick={() => setPaymentMode("multi")} className={`px-2 py-1 text-xs rounded ${paymentMode === "multi" ? "bg-white shadow" : ""}`}>多人</button></div></div>
+                                        {paymentMode === "single" ? (
+                                            <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">{people.map(p => <button key={p.id} onClick={() => setSinglePayerId(p.id)} className={`px-4 py-2 rounded-lg text-sm whitespace-nowrap ${singlePayerId === p.id ? "bg-emerald-600 text-white" : "bg-white border"}`}>{p.name}</button>)}</div>
+                                        ) : (
+                                            <div className="space-y-2">{people.map(p => <div key={p.id} className="flex items-center gap-2"><span className="text-sm w-16 truncate">{p.name}</span><input type="number" value={multiPayerMap[p.id]||''} onChange={e => setMultiPayerMap(prev => ({...prev, [p.id]: e.target.value}))} className="flex-1 p-2 border rounded" /></div>)} <div className="text-right text-xs text-gray-500">剩: {getMultiPayerRemaining()}</div></div>
+                                        )}
+                                    </div>
+                                    <div>
+                                        <span className="text-xs text-gray-500 block mb-1">分攤給?</span>
+                                        <div className="grid grid-cols-3 gap-2">{people.map(p => <button key={p.id} onClick={() => setNewExpenseInvolved(prev => prev.includes(p.id) ? prev.filter(id => id !== p.id) : [...prev, p.id])} className={`py-2 text-sm rounded border ${newExpenseInvolved.includes(p.id) ? "bg-emerald-50 border-emerald-500 text-emerald-700" : "bg-white"}`}>{p.name}</button>)}</div>
+                                        <button onClick={() => setNewExpenseInvolved(people.map(p => p.id))} className="text-xs text-emerald-600 mt-1 float-right">全選</button>
+                                    </div>
+                                    <button onClick={handleSaveExpense} className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold shadow-lg mt-4">儲存</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    {/* Rate Modal */}
+                    {showRateModal && (
+                        <div className="absolute inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
+                            <div className="bg-white w-full max-w-sm rounded-2xl p-6 shadow-2xl">
+                                <div className="flex justify-between mb-4"><h3 className="font-bold">匯率設定</h3><button onClick={() => setShowRateModal(false)}><i className="fas fa-times"></i></button></div>
+                                <div className="space-y-3">{Object.keys(DEFAULT_RATES).filter(c => c !== "TWD").map(c => <div key={c} className="flex justify-between bg-gray-50 p-3 rounded"><span>{CURRENCY_LABELS[c]}</span><div className="flex gap-2 items-center"><input type="number" step="0.001" value={rates[c]} onChange={e => updateRate(c, e.target.value)} className="w-20 p-1 border text-right" /><span className="text-xs text-gray-400">TWD</span></div></div>)}</div>
+                                <button onClick={() => setShowRateModal(false)} className="w-full mt-6 bg-gray-800 text-white py-2 rounded-lg">完成</button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        createRoot(document.getElementById("root")).render(<App />);
+    </script>
+</body>
+</html>
